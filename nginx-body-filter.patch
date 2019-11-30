@@ -1,0 +1,108 @@
+diff -ur nginx-1.15.8/src/http/ngx_http.c nginx-1.15.8-mod/src/http/ngx_http.c
+--- nginx-1.15.8/src/http/ngx_http.c	2019-05-17 05:27:01.000000000 +0800
++++ nginx-1.15.8-mod/src/http/ngx_http.c	2019-07-09 20:03:29.000000000 +0800
+@@ -67,6 +67,9 @@
+     ngx_http_conf_addr_t *addr);
+ #endif
+ 
++static ngx_int_t ngx_http_dummy_input_body_filter(ngx_http_request_t *r,
++    ngx_buf_t *buf);
++
+ ngx_uint_t   ngx_http_max_module;
+ 
+ 
+@@ -74,6 +77,9 @@
+ ngx_http_output_body_filter_pt    ngx_http_top_body_filter;
+ ngx_http_request_body_filter_pt   ngx_http_top_request_body_filter;
+ 
++ngx_int_t (*ngx_http_top_input_body_filter) (ngx_http_request_t *r,
++    ngx_buf_t *buf);
++
+ 
+ ngx_str_t  ngx_http_html_default_types[] = {
+     ngx_string("text/html"),
+@@ -217,6 +223,9 @@
+     pcf = *cf;
+     cf->ctx = ctx;
+ 
++    /* init input body filter pointer */
++    ngx_http_top_input_body_filter = ngx_http_dummy_input_body_filter;
++
+     for (m = 0; cf->cycle->modules[m]; m++) {
+         if (cf->cycle->modules[m]->type != NGX_HTTP_MODULE) {
+             continue;
+@@ -2076,3 +2085,11 @@
+ 
+     return NGX_OK;
+ }
++
++static ngx_int_t
++ngx_http_dummy_input_body_filter(ngx_http_request_t *r, ngx_buf_t *buf)
++{
++    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
++                   "http dummy input body filter");
++    return NGX_OK;
++}
+diff -ur nginx-1.15.8/src/http/ngx_http_core_module.h nginx-1.15.8-mod/src/http/ngx_http_core_module.h
+--- nginx-1.15.8/src/http/ngx_http_core_module.h	2019-01-19 06:07:00.000000000 +0800
++++ nginx-1.15.8-mod/src/http/ngx_http_core_module.h	2019-07-09 19:50:46.000000000 +0800
+@@ -515,6 +515,8 @@
+ typedef ngx_int_t (*ngx_http_request_body_filter_pt)
+     (ngx_http_request_t *r, ngx_chain_t *chain);
+ 
++typedef ngx_int_t (*ngx_http_input_body_filter_pt)
++    (ngx_http_request_t *r, ngx_buf_t *buf);
+ 
+ ngx_int_t ngx_http_output_filter(ngx_http_request_t *r, ngx_chain_t *chain);
+ ngx_int_t ngx_http_write_filter(ngx_http_request_t *r, ngx_chain_t *chain);
+diff -ur nginx-1.15.8/src/http/ngx_http.h nginx-1.15.8-mod/src/http/ngx_http.h
+--- nginx-1.15.8/src/http/ngx_http.h	2019-01-19 06:07:00.000000000 +0800
++++ nginx-1.15.8-mod/src/http/ngx_http.h	2019-07-09 19:52:07.000000000 +0800
+@@ -171,6 +171,6 @@
+ extern ngx_http_output_header_filter_pt  ngx_http_top_header_filter;
+ extern ngx_http_output_body_filter_pt    ngx_http_top_body_filter;
+ extern ngx_http_request_body_filter_pt   ngx_http_top_request_body_filter;
+-
++extern ngx_http_input_body_filter_pt     ngx_http_top_input_body_filter;
+ 
+ #endif /* _NGX_HTTP_H_INCLUDED_ */
+diff -ur nginx-1.15.8/src/http/ngx_http_request_body.c nginx-1.15.8-mod/src/http/ngx_http_request_body.c
+--- nginx-1.15.8/src/http/ngx_http_request_body.c	2019-05-17 05:27:01.000000000 +0800
++++ nginx-1.15.8-mod/src/http/ngx_http_request_body.c	2019-07-09 20:00:25.000000000 +0800
+@@ -1088,6 +1088,7 @@
+ {
+     ngx_buf_t                 *b;
+     ngx_chain_t               *cl;
++    ngx_int_t                 *rc;
+     ngx_http_request_body_t   *rb;
+ 
+     rb = r->request_body;
+@@ -1168,5 +1169,28 @@
+         }
+     }
+ 
++    for (cl = in; cl; cl = cl->next) {
++        rc = ngx_http_top_input_body_filter(r, cl->buf);
++        if (rc != NGX_OK) {
++            if (rc > NGX_OK && rc < NGX_HTTP_SPECIAL_RESPONSE) {
++                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
++                              "input filter: return code 1xx or 2xx "
++                              "will cause trouble and is converted to 500");
++            }
++
++            /**
++             * NGX_OK: success and continue;
++             * NGX_ERROR: failed and exit;
++             * NGX_AGAIN: not ready and retry later.
++             */
++
++            if (rc < NGX_HTTP_SPECIAL_RESPONSE && rc != NGX_AGAIN) {
++                rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
++            }
++
++            return rc;
++        }
++    }
++
+     return NGX_OK;
+ }
